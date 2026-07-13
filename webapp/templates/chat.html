@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Ask the Tourist Assistant{% endblock %}
+{% block content %}
+  <h1>Ask the Tourist Assistant</h1>
+  <form method="post">
+    <textarea name="query" rows="3" placeholder="e.g. What's the weather in Kyoto and what attractions are nearby?">{{ query }}</textarea>
+    <button type="submit">Send</button>
+  </form>
+
+  {% if error %}
+    <p class="error">{{ error }}</p>
+  {% endif %}
+
+  {% if answer %}
+    <h2>Response</h2>
+    <pre>{{ answer }}</pre>
+  {% endif %}
+{% endblock %}

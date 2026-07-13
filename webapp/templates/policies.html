@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block title %}Policy Comparison{% endblock %}
+{% block content %}
+  <h1>Policy Comparison by Place</h1>
+
+  {% if places %}
+    <form method="post">
+      <select name="place">
+        {% for place in places %}
+          <option value="{{ place }}" {% if place == selected_place %}selected{% endif %}>{{ place }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit">Compare</button>
+    </form>
+  {% else %}
+    <p class="error">No places configured in policy_locations.yaml.</p>
+  {% endif %}
+
+  {% if error %}
+    <p class="error">{{ error }}</p>
+  {% endif %}
+
+  {% if report_html %}
+    <div class="report">{{ report_html | safe }}</div>
+  {% endif %}
+{% endblock %}

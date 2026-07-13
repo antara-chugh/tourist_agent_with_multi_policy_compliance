@@ -1,0 +1,16 @@
+# Maps a deployment "place" to the policy_label values (see index_policies.py)
+# that should be enforced there. A label is the policy YAML's filename stem
+# (e.g. policy_files/alcohol_prohibited.yaml -> "alcohol_prohibited"), unless
+# index_policies.py had to disambiguate a duplicate stem, in which case it
+# suffixes _2, _3, etc.
+#
+# This file only changes which already-indexed policies apply where — editing
+# it never requires re-running index_policies.py or recomputing any embeddings.
+locations:
+  us:
+    - alcohol_prohibited
+    - alcohol_off_topic
+  eu:
+    - alcohol_consumption_permissive
+    - alcohol_anti_coercion
+    - alcohol_off_topic
