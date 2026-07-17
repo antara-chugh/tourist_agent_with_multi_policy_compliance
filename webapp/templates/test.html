@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}Guardrail Evaluation{% endblock %}
+{% block content %}
+  <h1>Guardrail Evaluation</h1>
+  <p class="hint">
+    Tests the embedding-similarity policy hook itself (the same logic as <code>find_policy_conflicts</code> /
+    <code>find_policy_conflicts_model_response</code> in <code>tourist_assistant_hooks.py</code>) directly
+    against a labeled dataset — no live agent or LLM call involved.
+  </p>
+
+  <dl class="run-meta">
+    <dt>Hook type</dt>
+    <dd><code>{{ hook_type }}</code> — a similarity search against each policy's indexed "cannot contain" chunks.</dd>
+    <dt>Dataset</dt>
+    <dd>
+      <a href="https://huggingface.co/datasets/{{ dataset_name }}" target="_blank">{{ dataset_name }}</a>
+      (split: <code>{{ dataset_split }}</code>)
+    </dd>
+  </dl>
+
+  <section class="eval-category">
+    <h2>Metrics</h2>
+    <h3>Prompt-level moderation</h3>
+    <p class="hint">Embeds each unsafe prompt and checks it against the policies before generation would happen.</p>
+    <ul>
+      <li><strong>block_fired_rate</strong> — a policy block fired at all (any hit above threshold), over prompts that are ground-truth unsafe.</li>
+      <li><strong>any_hit_match_rate</strong> — at least one fired hit's policy matches the category(ies) the prompt is actually flagged unsafe for.</li>
+      <li><strong>top_hit_match_rate</strong> — the single closest hit's policy matches one of those categories.</li>
+    </ul>
+    <h3>QA-moderation (response)</h3>
+    <p class="hint">Embeds each response (both safe and unsafe) and checks whether what was actually said is unsafe.</p>
+    <ul>
+      <li><strong>precision / recall</strong> — a block should fire only on unsafe responses; precision = of responses flagged, how many were truly unsafe; recall = of truly unsafe responses, how many got flagged.</li>
+      <li><strong>safety_accuracy</strong> — unsafe responses flagged unsafe <em>and</em> safe responses left unflagged, over all rows.</li>
+      <li><strong>any_hit_match_rate / top_hit_match_rate</strong> — same definitions as above, computed only over the actually-unsafe responses.</li>
+    </ul>
+  </section>
+
+  <form method="post">
+    <label>Max rows to evaluate</label>
+    <input type="number" name="max_rows" value="{{ max_rows }}" min="1" step="1">
+    <button type="submit">Run evaluation</button>
+  </form>
+
+  {% if error %}
+    <p class="error">{{ error }}</p>
+  {% endif %}
+
+  {% if result %}
+    <p class="hint">
+      Loaded {{ result.num_rows_loaded }} row(s) from {{ result.dataset_name }} (split={{ result.split }});
+      similarity threshold sweep: 0.50-0.95 in steps of 0.05.
+    </p>
+    <p class="hint">
+      Sample CSVs (20 random rows, every raw candidate hit with its similarity, unfiltered by threshold):
+      <a href="{{ url_for('test_download', filename='eval_prompts_samples.csv') }}">eval_prompts_samples.csv</a> ·
+      <a href="{{ url_for('test_download', filename='eval_qa_pairs_samples.csv') }}">eval_qa_pairs_samples.csv</a>
+    </p>
+    <p class="hint">
+      QA-moderation false positives/negatives at the live hook's real operating threshold ({{ "%.2f"|format(operating_threshold) }}):
+      <a href="{{ url_for('test_download', filename='eval_qa_pairs_errors.csv') }}">eval_qa_pairs_errors.csv</a>
+    </p>
+
+    <section class="eval-category">
+      <h2>Prompt-level moderation</h2>
+      {% for policy, policy_result in result.prompts.items() %}
+        <h3>{{ policy_result.display_name }}</h3>
+        <p class="muted">Policy: <code>{{ policy }}</code></p>
+
+        {{ charts["prompts||" ~ policy] | safe }}
+
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Threshold</th>
+                <th>Num rows</th>
+                <th>Block fired rate</th>
+                <th>Any-hit match rate</th>
+                <th>Top-hit match rate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in policy_result.thresholds %}
+                <tr>
+                  <td>{{ "%.2f"|format(row.threshold) }}</td>
+                  <td>{{ row.num_rows }}</td>
+                  <td>{{ "%.3f"|format(row.block_fired_rate) }}</td>
+                  <td>{{ "%.3f"|format(row.any_hit_match_rate) }}</td>
+                  <td>{{ "%.3f"|format(row.top_hit_match_rate) }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endfor %}
+    </section>
+
+    <section class="eval-category">
+      <h2>QA-moderation (response)</h2>
+      {% for policy, policy_result in result.qa_pairs.items() %}
+        <h3>{{ policy_result.display_name }}</h3>
+        <p class="muted">Policy: <code>{{ policy }}</code></p>
+
+        {{ charts["qa_classification||" ~ policy] | safe }}
+        {{ charts["qa_match||" ~ policy] | safe }}
+
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Threshold</th>
+                <th>Num rows</th>
+                <th>Num unsafe</th>
+                <th>TP</th><th>FP</th><th>FN</th><th>TN</th>
+                <th>Precision</th><th>Recall</th><th>Safety accuracy</th>
+                <th>Any-hit match rate</th><th>Top-hit match rate</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for row in policy_result.thresholds %}
+                <tr>
+                  <td>{{ "%.2f"|format(row.threshold) }}</td>
+                  <td>{{ row.num_rows }}</td>
+                  <td>{{ row.num_unsafe }}</td>
+                  <td>{{ row.tp }}</td>
+                  <td>{{ row.fp }}</td>
+                  <td>{{ row.fn }}</td>
+                  <td>{{ row.tn }}</td>
+                  <td>{{ "%.3f"|format(row.precision) }}</td>
+                  <td>{{ "%.3f"|format(row.recall) }}</td>
+                  <td>{{ "%.3f"|format(row.safety_accuracy) }}</td>
+                  <td>{{ "%.3f"|format(row.any_hit_match_rate) }}</td>
+                  <td>{{ "%.3f"|format(row.top_hit_match_rate) }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endfor %}
+    </section>
+  {% endif %}
+{% endblock %}
