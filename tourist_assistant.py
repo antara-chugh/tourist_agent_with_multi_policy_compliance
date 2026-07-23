@@ -15,9 +15,10 @@ from tourist_assistant_tools import (
     translate_phrase,
 )
 from tourist_assistant_hooks import (
-    user_input_safety, 
-    tool_security, 
+    user_input_safety,
+    tool_security,
     tool_sanitizer,
+    model_output_safety,
 )
 
 logging.basicConfig(
@@ -67,11 +68,20 @@ GOALS = [
 async def run_goal(goals: list[str], username: str = "demo_user") -> None:
 
     # agent_plugins includes:
-    #   - detect_travel_distress  (GENERATION_PRE_CALL, priority 1)
-    #   - enforce_tool_allowlist  (TOOL_PRE_INVOKE)
-    #   - redact_pii              (TOOL_POST_INVOKE)
-    #   - audit_tool_calls        (TOOL_POST_INVOKE, fire-and-forget)
-    with start_session(model_id="llama3.1", ctx=ChatContext(), plugins=[tool_sanitizer, user_input_safety]) as m:
+    #   - detect_travel_distress            (GENERATION_PRE_CALL, priority 1)
+    #   - find_policy_conflicts              (GENERATION_PRE_CALL, priority 2)
+    #   - find_policy_conflicts_model_response (GENERATION_POST_CALL, priority 2)
+    #   - enforce_tool_allowlist             (TOOL_PRE_INVOKE)
+    #   - redact_pii                         (TOOL_POST_INVOKE)
+    #   - audit_tool_calls                   (TOOL_POST_INVOKE, fire-and-forget)
+    # llama3.1 doesn't reliably turn react()'s ReAct-style "Thought/Action"
+    # prompt template into a real tool-call API request (see webapp/app.py's
+    # AGENT_MODEL_ID comment for the isolated test that showed this) —
+    # gemma4:31b-cloud (already pulled via `ollama`) handles it correctly.
+    with start_session(
+        model_id="gemma4:31b-cloud", ctx=ChatContext(),
+        plugins=[tool_sanitizer, user_input_safety, model_output_safety],
+    ) as m:
         for goal in goals:
             log.info("=" * 60)
             log.info("GOAL: %s", goal)
@@ -83,7 +93,7 @@ async def run_goal(goals: list[str], username: str = "demo_user") -> None:
                     context=m.ctx,
                     backend=m.backend,
                     tools=tools,
-                    loop_budget=2,
+                    loop_budget=4,
                 )
                 log.info("RESPONSE:\n%s", out)
             except Exception as exc:

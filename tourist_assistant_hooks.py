@@ -205,9 +205,72 @@ def _hit_fields(hit: dict) -> dict:
     return hit.get("entity", hit)
 
 
+def _check_text_for_policy_conflicts(text: str, source: str) -> PluginResult | None:
+    """Embed `text` and check it against every indexed policy's reply_cannot_contain
+    chunks. Returns a block() PluginResult if it's semantically close to something
+    a policy forbids, else None. `source` (e.g. "request"/"response") is only used
+    in logging/reason text so pre-call vs post-call hits are distinguishable."""
+    if not text.strip():
+        return None
+
+    client = _get_milvus_client()
+    if client is None:
+        log.warning("[policy_conflicts] no policy_chunks collection found — run index_policies.py first")
+        return None
+
+    query_vector = _get_embedding_model().encode(text).tolist()
+    hits = client.search(
+        collection_name=_POLICY_COLLECTION,
+        data=[query_vector],
+        filter='chunk_type == "cannot_contain"',
+        limit=5,
+        output_fields=["text", "risk_name", "risk_id", "policy_label"],
+    )[0]
+
+    # For metric_type="COSINE", Milvus returns *distance* (1 - cosine similarity),
+    # not similarity — smaller means more similar, so convert back before thresholding.
+    scored = [(1 - hit["distance"], hit) for hit in hits]
+    matches = [(similarity, hit) for similarity, hit in scored if similarity > _POLICY_CONFLICT_THRESHOLD]
+    if not matches:
+        return None
+
+    log.warning(
+        "[policy_conflicts] %s matched %d forbidden policy chunk(s) above threshold %.2f",
+        source, len(matches), _POLICY_CONFLICT_THRESHOLD,
+    )
+    # PluginViolationError only carries `reason`/`code` out of the plugin
+    # pipeline (the `details` dict below is dropped by mellea's plugin
+    # manager when it raises the exception), so name the violated policy
+    # directly in the reason text — that's what ends up on the frontend.
+    top_similarity, top_hit = matches[0]
+    top_fields = _hit_fields(top_hit)
+    reason = (
+        f"The {source} conflicts with policy '{top_fields['policy_label']}' "
+        f"(risk {top_fields['risk_id']} – {top_fields['risk_name']}): "
+        f"forbids \"{top_fields['text']}\" (similarity {top_similarity:.2f})"
+    )
+    return block(
+        reason,
+        code="POLICY_CONFLICT",
+        details={
+            "text": text,
+            "hits": [
+                {
+                    "similarity": round(similarity, 3),
+                    "policy_label": _hit_fields(hit)["policy_label"],
+                    "risk_name": _hit_fields(hit)["risk_name"],
+                    "risk_id": _hit_fields(hit)["risk_id"],
+                    "text": _hit_fields(hit)["text"],
+                }
+                for similarity, hit in matches
+            ],
+        },
+    )
+
+
 @hook(HookType.GENERATION_PRE_CALL, mode=PluginMode.SEQUENTIAL, priority=2)
 async def find_policy_conflicts(payload, ctx):
-    """Embed the current request and check it against every indexed policy's
+    """Embed the user's request and check it against every indexed policy's
     reply_cannot_contain chunks. If it's semantically close to something a
     policy forbids, block and report which policy/risk it hit."""
     raw_context = payload.context
@@ -225,68 +288,33 @@ async def find_policy_conflicts(payload, ctx):
             if hasattr(model_input, 'goal'):
                 context += (str(model_input.goal))
 
-    if not context.strip():
-        return None
+    return _check_text_for_policy_conflicts(context, source="request")
 
-    client = _get_milvus_client()
-    if client is None:
-        log.warning("[policy_conflicts] no policy_chunks collection found — run index_policies.py first")
-        return None
 
-    query_vector = _get_embedding_model().encode(context).tolist()
-    hits = client.search(
-        collection_name=_POLICY_COLLECTION,
-        data=[query_vector],
-        filter='chunk_type == "cannot_contain"',
-        limit=5,
-        output_fields=["text", "risk_name", "risk_id", "policy_label"],
-    )[0]
+@hook(HookType.GENERATION_POST_CALL, mode=PluginMode.SEQUENTIAL, priority=2)
+async def find_policy_conflicts_model_response(payload, ctx):
+    """Embed the model's fully-generated response and check it against every
+    indexed policy's reply_cannot_contain chunks. If the response is
+    semantically close to something a policy forbids, block it from being
+    returned and report which policy/risk it hit.
 
-    # For metric_type="COSINE", Milvus returns *distance* (1 - cosine similarity),
-    # not similarity — smaller means more similar, so convert back before thresholding.
-    scored = [(1 - hit["distance"], hit) for hit in hits]
-    matches = [(similarity, hit) for similarity, hit in scored if similarity > _POLICY_CONFLICT_THRESHOLD]
-    if not matches:
-        return None
+    Per mellea's GenerationPostCallPayload (mellea/plugins/hooks/generation.py),
+    this hook fires once the model output thunk is fully computed, so
+    `model_output.value` is guaranteed to already hold the generated text —
+    unlike GENERATION_PRE_CALL, there's no `.context`/`.action` here to read
+    a user goal from.
+    """
+    model_output = payload.model_output
+    response_text = getattr(model_output, "value", None) or ""
 
-    log.warning(
-        "[policy_conflicts] context matched %d forbidden policy chunk(s) above threshold %.2f",
-        len(matches), _POLICY_CONFLICT_THRESHOLD,
-    )
-    # PluginViolationError only carries `reason`/`code` out of the plugin
-    # pipeline (the `details` dict below is dropped by mellea's plugin
-    # manager when it raises the exception), so name the violated policy
-    # directly in the reason text — that's what ends up on the frontend.
-    top_similarity, top_hit = matches[0]
-    top_fields = _hit_fields(top_hit)
-    reason = (
-        f"Conflicts with policy '{top_fields['policy_label']}' "
-        f"(risk {top_fields['risk_id']} – {top_fields['risk_name']}): "
-        f"forbids \"{top_fields['text']}\" (similarity {top_similarity:.2f})"
-    )
-    return block(
-        reason,
-        code="POLICY_CONFLICT",
-        details={
-            "context": context,
-            "hits": [
-                {
-                    "similarity": round(similarity, 3),
-                    "policy_label": _hit_fields(hit)["policy_label"],
-                    "risk_name": _hit_fields(hit)["risk_name"],
-                    "risk_id": _hit_fields(hit)["risk_id"],
-                    "text": _hit_fields(hit)["text"],
-                }
-                for similarity, hit in matches
-            ],
-        },
-    )
+    return _check_text_for_policy_conflicts(response_text, source="response")
 
 # ---------------------------------------------------------------------------
 # Compose into PluginSets for clean session-scoped registration
 # ---------------------------------------------------------------------------
 
 user_input_safety = PluginSet("user-input-safety", [detect_travel_distress, find_policy_conflicts])
+model_output_safety = PluginSet("model_output_verification", [find_policy_conflicts_model_response])
 
 tool_security = PluginSet("tool-security", [enforce_tool_allowlist])
 

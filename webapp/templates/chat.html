@@ -1,9 +1,27 @@
 {% extends "base.html" %}
-{% block title %}Ask the Tourist Assistant{% endblock %}
+{% block title %}Ask the Assistant{% endblock %}
 {% block content %}
-  <h1>Ask the Tourist Assistant</h1>
+  <h1>Ask the Assistant</h1>
   <form method="post">
     <textarea name="query" rows="3" placeholder="e.g. What's the weather in Kyoto and what attractions are nearby?">{{ query }}</textarea>
+
+    <fieldset>
+      <legend>Response enforcement</legend>
+      <p class="hint">How to handle a response that a policy check flags. "Base model" runs with no policy
+        enforcement at all. "Base model + policies appended to prompt" runs the same unenforced model but with the
+        alcohol_off_topic, cybersecurity_risks, financial_crimes_and_illegal_trading, and private_information
+        policies added to its system prompt, so compliance relies on the model following instructions rather than
+        any hook. "Hard block" refuses a flagged response outright. The critique &amp; revise modes
+        instead ask a model to reflect on the response against the policy and rewrite it — see
+        <code>critique_enforcement.py</code>. The last option runs all five on the same prompt for comparison.</p>
+      {% for value, label in enforcement_modes.items() %}
+        <label class="checkbox-row">
+          <input type="radio" name="enforcement_mode" value="{{ value }}" {% if enforcement_mode == value %}checked{% endif %}>
+          {{ label }}
+        </label>
+      {% endfor %}
+    </fieldset>
+
     <button type="submit">Send</button>
   </form>
 
@@ -11,8 +29,26 @@
     <p class="error">{{ error }}</p>
   {% endif %}
 
-  {% if answer %}
-    <h2>Response</h2>
-    <pre>{{ answer }}</pre>
-  {% endif %}
+  {% for result in results %}
+    <div class="critique-run">
+      <h2>{{ result.label }}</h2>
+
+      {% if result.error %}
+        <p class="error">{{ result.error }}</p>
+      {% elif result.critique_run %}
+        <h3>Original response</h3>
+        <pre>{{ result.answer }}</pre>
+
+        <h3>Critique (by {{ result.critique_run.critique.critique_model_id }})</h3>
+        <pre>{{ result.critique_run.critique.text }}</pre>
+
+        <h3>Revised response</h3>
+        <pre>{{ result.critique_run.revised_response }}</pre>
+
+        <p class="muted">critic latency: {{ result.critique_run.critique.latency_ms }}ms · revision latency: {{ result.critique_run.revision_latency_ms }}ms</p>
+      {% else %}
+        <pre>{{ result.answer }}</pre>
+      {% endif %}
+    </div>
+  {% endfor %}
 {% endblock %}
